@@ -343,7 +343,7 @@ export default function AudioQCStation() {
   };
 
   const vColors={PASS:'#16a34a',NEEDS_REVIEW:'#eab308',FAIL:'#ef4444'};
-  const totalIssues=results?(results.missingDialogue?.length||0)+(results.sfxIssues?.filter(i=>i.status!=='ok').length||0)+(results.musicIssues?.filter(i=>i.status!=='ok').length||0)+(results.ambientIssues?.filter(i=>i.status!=='ok').length||0)+(results.voiceActingIssues?.filter(i=>i.status!=='ok').length||0)+(results.pauseIssues?.length||0)+(results.noiseIssues?.length||0)+(results.mispronunciations?.length||0):0;
+  const totalIssues=results?(results.missingDialogue?.length||0)+(results.extraDialogue?.length||0)+(results.sfxIssues?.filter(i=>i.status!=='ok').length||0)+(results.musicIssues?.filter(i=>i.status!=='ok').length||0)+(results.ambientIssues?.filter(i=>i.status!=='ok').length||0)+(results.voiceActingIssues?.filter(i=>i.status!=='ok').length||0)+(results.pauseIssues?.length||0)+(results.noiseIssues?.length||0)+(results.mispronunciations?.length||0):0;
 
   return (
     <div style={{minHeight:'100vh',background:'linear-gradient(170deg,#080b14 0%,#0f1524 35%,#0c1220 100%)',color:'#cbd5e1',fontFamily:"'IBM Plex Mono','Fira Code',monospace"}}>
@@ -456,6 +456,7 @@ export default function AudioQCStation() {
             )}
             <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
               <Stat label="Missing Lines" count={results.missingDialogue?.length||0} color="#ef4444"/>
+              <Stat label="Extra Lines" count={results.extraDialogue?.length||0} color="#f472b6"/>
               <Stat label="Wrong Words" count={results.mispronunciations?.length||0} color="#fb923c"/>
               <Stat label="SFX" count={results.sfxIssues?.filter(i=>i.status!=='ok').length||0} color="#f97316"/>
               <Stat label="Music" count={results.musicIssues?.filter(i=>i.status!=='ok').length||0} color="#a78bfa"/>
@@ -473,6 +474,7 @@ export default function AudioQCStation() {
             <div style={{display:'flex',flexDirection:'column',gap:16}}>
               {(activeTab==='overview'||activeTab==='dialogue')&&(<>
                 <IssueSection title="Missing dialogue lines" icon="💬" items={results.missingDialogue} renderItem={m=>(<><Badge level={m.severity}/><div><div style={{color:'#fca5a5',fontSize:12,fontStyle:'italic',lineHeight:1.5}}>"{m.line}"</div>{m.context&&<div style={{fontSize:10,color:'#475569',marginTop:2}}>{m.context}</div>}</div></>)}/>
+                <IssueSection title="Extra dialogue (not in script)" icon="🚨" items={results.extraDialogue} renderItem={m=>(<><Badge level={m.severity}/><div><div style={{color:'#f472b6',fontSize:12,fontStyle:'italic',lineHeight:1.5}}>"{m.line}"</div>{m.context&&<div style={{fontSize:10,color:'#475569',marginTop:2}}>{m.context}</div>}</div></>)}/>
                 <IssueSection title="Word differences" icon="🗣" items={results.mispronunciations} renderItem={m=>(<><Badge level={m.severity}/><span style={{color:'#86efac',fontSize:12}}>Script: <strong>{m.expected}</strong></span><span style={{color:'#334155'}}>→</span><span style={{color:'#fca5a5',fontSize:12}}>Heard: <strong>{m.heard}</strong></span></>)}/>
               </>)}
               {(activeTab==='overview'||activeTab==='sfx')&&<IssueSection title="SFX issues" icon="💥" items={results.sfxIssues?.filter(i=>i.status!=='ok')} renderItem={s=>(<><Badge level={s.severity}/><span style={{fontSize:10,fontWeight:700,color:'#f97316',textTransform:'uppercase',padding:'2px 6px',background:'rgba(249,115,22,0.1)',borderRadius:3}}>{s.status}</span><div><div style={{color:'#e2e8f0',fontSize:12}}>{s.cue}</div><div style={{fontSize:10,color:'#64748b',marginTop:2}}>{s.note}</div></div></>)}/>}
