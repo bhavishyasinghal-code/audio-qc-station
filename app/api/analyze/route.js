@@ -50,6 +50,9 @@ INSTRUCTIONS:
 5. SFX/Music/Ambient won't appear as text — use waveform data to infer presence.
 6. ONLY report real problems. Keep notes under 15 words.
 7. Be lenient — Whisper often drops punctuation, changes capitalization, or slightly rewords short phrases. This is normal and should NOT be flagged.
+8. Numbers are often transcribed differently — "thirty-one hundred" may appear as "3100" or "three thousand one hundred". These are the SAME and should NOT be flagged.
+9. Short narrative phrases like "Year. Thirty-one hundred." or "Designation. Lost Cause." may appear without periods or in slightly different form in the transcript. If the words are present ANYWHERE in the transcript, even without exact punctuation, they are NOT missing.
+10. Before marking ANY line as missing, search the ENTIRE transcript carefully for those words. Only mark as missing if the words truly do not appear in any form.
 
 Respond ONLY with valid JSON (no markdown, no backticks):
 {
