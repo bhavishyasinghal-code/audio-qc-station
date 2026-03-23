@@ -11,9 +11,9 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Missing script or transcript' }, { status: 400 });
     }
 
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    if (!anthropicKey) {
-      return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured. Add it in Vercel → Settings → Environment Variables.' }, { status: 500 });
+    const groqKey = process.env.GROQ_API_KEY;
+    if (!groqKey) {
+      return NextResponse.json({ error: 'GROQ_API_KEY not configured.' }, { status: 500 });
     }
 
     const prompt = `You are a professional Audio Drama QC specialist. Compare the ORIGINAL SCRIPT against the ACTUAL TRANSCRIPT word by word.
@@ -29,8 +29,8 @@ ${transcript.substring(0, 4500)}
 """
 
 ALL DIALOGUE LINES FROM SCRIPT (check each against transcript):
-${(dialogueLines || []).slice(0, 60).map((d, i) => `${i + 1}. ${d}`).join('\n')}
-${(dialogueLines || []).length > 60 ? `\n...+${dialogueLines.length - 60} more` : ''}
+${(dialogueLines || []).slice(0, 60).map((d, i) => (i + 1) + '. ' + d).join('\n')}
+${(dialogueLines || []).length > 60 ? '\n...+' + (dialogueLines.length - 60) + ' more' : ''}
 
 CUE COUNTS: ${(sfxCues || []).length} SFX, ${(musicCues || []).length} Music, ${(ambientCues || []).length} Ambient, ${(voaCues || []).length} VOA
 SFX: ${(sfxCues || []).join(' | ')}
@@ -64,17 +64,17 @@ Respond ONLY with valid JSON (no markdown, no backticks):
   "additionalNotes": ["short"]
 }`;
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': anthropicKey,
-        'anthropic-version': '2023-06-01',
+        'Authorization': 'Bearer ' + groqKey,
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
+        model: 'llama-3.3-70b-versatile',
         messages: [{ role: 'user', content: prompt }],
+        max_tokens: 4096,
+        temperature: 0.1,
       }),
     });
 
@@ -82,11 +82,11 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       const errText = await resp.text();
       let errMsg;
       try { errMsg = JSON.parse(errText).error?.message; } catch (e) { errMsg = errText.substring(0, 200); }
-      return NextResponse.json({ error: errMsg || `Analysis failed (${resp.status})` }, { status: resp.status });
+      return NextResponse.json({ error: errMsg || 'Analysis failed (' + resp.status + ')' }, { status: resp.status });
     }
 
     const data = await resp.json();
-    const text = data.content.map((i) => (i.type === 'text' ? i.text : '')).join('');
+    const text = (data.choices?.[0]?.message?.content || '').trim();
     let clean = text.replace(/```json|```/g, '').trim();
 
     let parsed;
