@@ -14,7 +14,7 @@ const CUE_TYPES = {
 
 /* ─── Script Parser ─── */
 function parseScript(raw) {
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean).filter(l => !/^Ep\s*\d+/i.test(l.replace(/\*+/g, '').trim()));
   const parsed = [];
   for (const line of lines) {
     const clean = line.replace(/\*+/g, '').trim();
