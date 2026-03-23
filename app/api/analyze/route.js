@@ -6,13 +6,10 @@ function normalize(text) {
   return (text || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
-// Check if two words are similar (allows minor spelling differences)
 function wordsSimilar(a, b) {
   if (a === b) return true;
   if (a.length < 3 || b.length < 3) return a === b;
-  // One contains the other (e.g. "werewolves" vs "werewolf")
   if (a.includes(b) || b.includes(a)) return true;
-  // Levenshtein-like: allow 1-2 char difference for longer words
   if (Math.abs(a.length - b.length) > 2) return false;
   let diff = 0;
   const longer = a.length >= b.length ? a : b;
@@ -24,57 +21,87 @@ function wordsSimilar(a, b) {
   return true;
 }
 
-// Check if a script line's words exist in the transcript (90%+ match with spelling tolerance)
+// Check if 90%+ words from a script line exist in transcript
 function lineExistsInTranscript(line, transcriptWords) {
   const words = normalize(line).split(' ').filter(w => w.length > 1);
   if (words.length === 0) return true;
-  
   let found = 0;
   for (const word of words) {
-    // Exact match first
     if (transcriptWords.has(word)) { found++; continue; }
-    // Spelling tolerance: check if any transcript word is similar
     let matched = false;
     for (const tw of transcriptWords) {
       if (wordsSimilar(word, tw)) { matched = true; break; }
     }
     if (matched) found++;
   }
-  
-  const matchRatio = found / words.length;
-  return matchRatio >= 0.9; // 90% of words must be found
+  return (found / words.length) >= 0.9;
 }
 
-// Find transcript sentences not in script (90%+ of words must NOT match script)
-function findExtraDialogue(transcript, scriptLines) {
-  const scriptWords = new Set(normalize(scriptLines.join(' ')).split(' ').filter(w => w.length > 1));
-  const sentences = transcript.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 15);
-  const extras = [];
+// Build a set of all 3-word sequences (trigrams) from script for fast lookup
+function buildScriptNgrams(scriptText) {
+  const words = normalize(scriptText).split(' ').filter(w => w.length > 1);
+  const ngrams = new Set();
+  for (let i = 0; i <= words.length - 3; i++) {
+    ngrams.add(words[i] + ' ' + words[i+1] + ' ' + words[i+2]);
+  }
+  // Also add all individual words
+  const wordSet = new Set(words);
+  return { ngrams, wordSet };
+}
+
+// Find extra dialogue: sliding window over transcript, find runs of words not matching script
+function findExtraDialogue(transcript, scriptText) {
+  const { ngrams, wordSet } = buildScriptNgrams(scriptText);
+  const tWords = normalize(transcript).split(' ').filter(w => w.length > 1);
   
-  const hallucinations = ['thank you for watching', 'subscribe', 'like and share', 'see you in the next', 'leave a comment', 'hit the bell', 'thanks for listening', 'thank you', 'bye bye'];
+  // For each word, check if it and its neighbors form trigrams found in script
+  const matched = new Array(tWords.length).fill(false);
   
-  for (const sentence of sentences) {
-    const norm = normalize(sentence);
-    if (hallucinations.some(h => norm.includes(h))) continue;
-    
-    const words = norm.split(' ').filter(w => w.length > 1);
-    if (words.length < 4) continue;
-    
-    let found = 0;
-    for (const word of words) {
-      if (scriptWords.has(word)) { found++; continue; }
-      let matched = false;
-      for (const sw of scriptWords) {
-        if (wordsSimilar(word, sw)) { matched = true; break; }
-      }
-      if (matched) found++;
-    }
-    
-    const matchRatio = found / words.length;
-    if (matchRatio < 0.3) { // Less than 30% match to script = likely extra
-      extras.push(sentence);
+  for (let i = 0; i <= tWords.length - 3; i++) {
+    const tri = tWords[i] + ' ' + tWords[i+1] + ' ' + tWords[i+2];
+    if (ngrams.has(tri)) {
+      matched[i] = true;
+      matched[i+1] = true;
+      matched[i+2] = true;
     }
   }
+  
+  // Also match individual words with spelling tolerance
+  for (let i = 0; i < tWords.length; i++) {
+    if (matched[i]) continue;
+    if (wordSet.has(tWords[i])) { matched[i] = true; continue; }
+    for (const sw of wordSet) {
+      if (wordsSimilar(tWords[i], sw)) { matched[i] = true; break; }
+    }
+  }
+  
+  // Find runs of 5+ consecutive unmatched words = extra dialogue
+  const extras = [];
+  let runStart = -1;
+  
+  // Common Whisper hallucination words
+  const hallWords = new Set(['thank', 'watching', 'subscribe', 'subscribed', 'subscribers', 'comment', 'comments', 'bell', 'notification', 'video', 'channel', 'like', 'share', 'bye']);
+  
+  for (let i = 0; i <= tWords.length; i++) {
+    if (i < tWords.length && !matched[i]) {
+      if (runStart === -1) runStart = i;
+    } else {
+      if (runStart !== -1) {
+        const runLen = i - runStart;
+        if (runLen >= 5) {
+          const phrase = tWords.slice(runStart, i).join(' ');
+          // Check if it's a Whisper hallucination
+          const phraseWords = tWords.slice(runStart, i);
+          const hallCount = phraseWords.filter(w => hallWords.has(w)).length;
+          if (hallCount / phraseWords.length < 0.4) {
+            extras.push(phrase);
+          }
+        }
+        runStart = -1;
+      }
+    }
+  }
+  
   return extras;
 }
 
@@ -92,7 +119,7 @@ export async function POST(request) {
       return NextResponse.json({ error: 'GROQ_API_KEY not configured.' }, { status: 500 });
     }
 
-    // ── STEP 1: Strict programmatic comparison ──
+    // ── Programmatic comparison ──
     const transcriptWords = new Set(normalize(transcript).split(' ').filter(w => w.length > 1));
     
     const missingLines = [];
@@ -105,9 +132,9 @@ export async function POST(request) {
       }
     }
 
-    const extraLines = findExtraDialogue(transcript, dialogueLines || []);
+    const extraLines = findExtraDialogue(transcript, scriptText);
 
-    // ── STEP 2: AI only verifies suspicious items ──
+    // ── AI verification ──
     const prompt = `You are an audio QC specialist verifying pre-detected issues.
 
 SCRIPT:
@@ -120,23 +147,23 @@ TRANSCRIPT:
 ${transcript.substring(0, 3000)}
 """
 
-LINES FLAGGED AS MISSING (90%+ word match failed — verify each one. Only keep lines that are TRULY absent. Remove if the meaning exists anywhere in transcript):
+LINES FLAGGED AS MISSING FROM RECORDING (90%+ word match failed):
 ${missingLines.length > 0 ? missingLines.map((l, i) => (i+1) + '. ' + l).join('\n') : 'None'}
 
-LINES FLAGGED AS EXTRA (not found in script — verify each. Remove if it matches any script content):
-${extraLines.length > 0 ? extraLines.map((l, i) => (i+1) + '. ' + l).join('\n') : 'None'}
+EXTRA PHRASES IN RECORDING NOT IN SCRIPT (5+ consecutive words not matching any script text):
+${extraLines.length > 0 ? extraLines.map((l, i) => (i+1) + '. "' + l + '"').join('\n') : 'None'}
 
 AUDIO DATA:
 - Duration: ${audioData?.duration || '?'}s
-- Long pauses >3s (MUST flag as critical): ${audioData?.longPauses || 'none'}
+- Long pauses >3s (flag as critical): ${audioData?.longPauses || 'none'}
 - All pauses >0.8s: ${audioData?.allPauses || 'none'}
-- Noise spikes (MUST flag each one): ${audioData?.noise || 'none'}
+- Noise spikes (flag each): ${audioData?.noise || 'none'}
 
 RULES:
-1. For missing lines: ONLY keep ones truly absent from transcript. Numbers like "3100" = "thirty one hundred". Remove false positives.
-2. For extra lines: ONLY keep ones genuinely not in script. Remove Whisper artifacts.
-3. Flag ALL pauses >3s as critical. Flag ALL noise spikes.
-4. Note any mispronunciations (clearly wrong words, not just spelling).
+1. Missing lines: keep only ones TRULY absent. Numbers like "3100"="thirty one hundred". Remove false positives.
+2. Extra phrases: keep ones genuinely not in script. These are ad-libs, retakes, wrong lines, or random speech by the voice actor. Remove if it loosely matches script content.
+3. Flag ALL pauses >3s. Flag ALL noise spikes.
+4. Note clear mispronunciations.
 
 Respond ONLY with valid JSON:
 {
@@ -144,7 +171,7 @@ Respond ONLY with valid JSON:
   "overallVerdict": "PASS|NEEDS_REVIEW|FAIL",
   "summary": "2-3 sentences",
   "missingDialogue": [{"line":"exact line","severity":"critical|warning","context":"where"}],
-  "extraDialogue": [{"line":"exact extra text","severity":"critical|warning","context":"location"}],
+  "extraDialogue": [{"line":"exact extra phrase from recording","severity":"critical|warning","context":"description of what it might be"}],
   "mispronunciations": [{"expected":"word","heard":"word","severity":"warning"}],
   "sfxIssues": [{"cue":"cue","status":"missing|weak","severity":"warning","note":"short"}],
   "musicIssues": [{"cue":"cue","status":"missing","severity":"warning","note":"short"}],
@@ -164,7 +191,7 @@ Respond ONLY with valid JSON:
       body: JSON.stringify({
         model: 'llama-3.3-70b-versatile',
         messages: [
-          { role: 'system', content: 'You verify pre-detected QC issues. Remove false positives. If a missing line exists in transcript in ANY form, remove it. If an extra line matches script in ANY form, remove it. Be conservative. Return valid JSON only.' },
+          { role: 'system', content: 'Verify pre-detected QC issues. Remove false positives only. If a missing line exists in transcript in any form, remove it. Keep extra dialogue that is genuinely not in the script. Return valid JSON only.' },
           { role: 'user', content: prompt }
         ],
         max_tokens: 4096,
@@ -200,7 +227,7 @@ Respond ONLY with valid JSON:
     }
 
     if (!parsed.additionalNotes) parsed.additionalNotes = [];
-    parsed.additionalNotes.push(presentLines.length + '/' + (dialogueLines||[]).length + ' lines matched (90%+ words). ' + missingLines.length + ' flagged for review.');
+    parsed.additionalNotes.push(presentLines.length + '/' + (dialogueLines||[]).length + ' lines matched (90%+). ' + missingLines.length + ' flagged as possibly missing. ' + extraLines.length + ' extra phrases detected.');
 
     return NextResponse.json(parsed);
   } catch (err) {
