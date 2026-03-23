@@ -70,7 +70,7 @@ async function compressWavToMp3Segments(file, onProgress) {
   const lame = await loadLameJs();
 
   // Read header
-  const headerBuf = await file.slice(0, Math.min(file.size, 500)).arrayBuffer();
+  const headerBuf = await file.slice(0, Math.min(file.size, 100000)).arrayBuffer();
   const { channels, sampleRate, bitsPerSample, dataOffset } = parseWavHeader(headerBuf);
 
   const targetRate = 16000;
