@@ -226,13 +226,105 @@ export default function AudioQCStation() {
       setAudioFile(f); setAudioName(f.name); setAudioSize(f.size); setError('');
     } else setError('Upload a valid audio file.');
   };
+  // Load PDF.js from CDN
+  async function loadPdfJs() {
+    if (typeof window !== 'undefined' && window.pdfjsLib) return window.pdfjsLib;
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      s.onload = () => {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        resolve(window.pdfjsLib);
+      };
+      s.onerror = () => reject(new Error('Failed to load PDF reader'));
+      document.head.appendChild(s);
+    });
+  }
+
+  // Extract text from PDF
+  async function extractPdfText(file) {
+    const pdfjsLib = await loadPdfJs();
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      pages.push(content.items.map(item => item.str).join(' '));
+    }
+    return pages.join('\n');
+  }
+
+  // Parse FDX (Final Draft XML)
+  function parseFdx(xmlText) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, 'text/xml');
+    const paragraphs = doc.querySelectorAll('Paragraph');
+    const lines = [];
+    for (const p of paragraphs) {
+      const type = p.getAttribute('Type') || '';
+      const texts = [];
+      for (const t of p.querySelectorAll('Text')) {
+        if (t.textContent.trim()) texts.push(t.textContent.trim());
+      }
+      const content = texts.join(' ');
+      if (!content) continue;
+      // Map FDX types to our format
+      if (type === 'Action' || type === 'Scene Heading' || type === 'General') {
+        lines.push(content);
+      } else if (type === 'Character') {
+        lines.push(content + ':');
+      } else if (type === 'Dialogue') {
+        lines.push(content);
+      } else if (type === 'Parenthetical') {
+        lines.push('VOA CUE: ' + content);
+      } else if (type === 'Transition') {
+        lines.push('MUSIC: ' + content);
+      } else {
+        lines.push(content);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  // Strip RTF to plain text
+  function stripRtf(rtfText) {
+    let text = rtfText;
+    text = text.replace(/\\par[d]?/g, '\n');
+    text = text.replace(/\{\\[^{}]*\}/g, '');
+    text = text.replace(/\\[a-z]+\d*\s?/gi, '');
+    text = text.replace(/[{}]/g, '');
+    text = text.replace(/\n{3,}/g, '\n\n');
+    return text.trim();
+  }
+
   const handleScript = async f => {
     setError(''); const n = f.name.toLowerCase();
     try {
-      if (n.endsWith('.docx')||n.endsWith('.doc')) { const b = await f.arrayBuffer(); const r = await mammoth.extractRawText({arrayBuffer:b}); setScriptText(r.value); setScriptFileName(f.name); }
-      else if (n.endsWith('.txt')||n.endsWith('.md')) { setScriptText(await f.text()); setScriptFileName(f.name); }
-      else setError('Upload .docx, .txt, or .md file.');
-    } catch(e) { setError('Failed to read: '+e.message); }
+      if (n.endsWith('.docx') || n.endsWith('.doc')) {
+        const b = await f.arrayBuffer();
+        const r = await mammoth.extractRawText({ arrayBuffer: b });
+        setScriptText(r.value); setScriptFileName(f.name);
+      } else if (n.endsWith('.pdf')) {
+        setProgress('Reading PDF...'); 
+        const text = await extractPdfText(f);
+        setScriptText(text); setScriptFileName(f.name);
+        setProgress('');
+      } else if (n.endsWith('.fdx')) {
+        const xml = await f.text();
+        const text = parseFdx(xml);
+        setScriptText(text); setScriptFileName(f.name);
+      } else if (n.endsWith('.fountain') || n.endsWith('.spmd')) {
+        setScriptText(await f.text()); setScriptFileName(f.name);
+      } else if (n.endsWith('.rtf')) {
+        const raw = await f.text();
+        setScriptText(stripRtf(raw)); setScriptFileName(f.name);
+      } else if (n.endsWith('.txt') || n.endsWith('.md')) {
+        setScriptText(await f.text()); setScriptFileName(f.name);
+      } else {
+        setError('Supported formats: DOCX, PDF, FDX (Final Draft), Fountain, RTF, TXT');
+      }
+    } catch(e) { setError('Failed to read: ' + e.message); }
   };
 
   const runQC = useCallback(async () => {
@@ -379,8 +471,8 @@ export default function AudioQCStation() {
                   onDragOver={e=>{e.preventDefault();setDragScript(true)}} onDragLeave={()=>setDragScript(false)}
                   onDrop={e=>{e.preventDefault();setDragScript(false);handleScript(e.dataTransfer.files[0])}}
                   style={{border:'2px dashed '+(dragScript?'#f97316':scriptFileName?'#16a34a':'#1e293b'),borderRadius:10,padding:'40px 16px',textAlign:'center',cursor:'pointer',background:dragScript?'rgba(249,115,22,0.05)':'rgba(0,0,0,0.2)'}}>
-                  <input ref={scriptRef} type="file" accept=".docx,.doc,.txt,.md" style={{display:'none'}} onChange={e=>handleScript(e.target.files[0])}/>
-                  {scriptFileName?(<><div style={{fontSize:24}}>✅</div><div style={{color:'#86efac',fontWeight:600,fontSize:12,marginTop:4,wordBreak:'break-all'}}>{scriptFileName}</div></>):(<><div style={{fontSize:24}}>📄</div><div style={{color:'#64748b',fontSize:12,marginTop:6}}>Drop script or click</div><div style={{fontSize:10,color:'#334155',marginTop:2}}>DOCX · DOC · TXT</div></>)}
+                  <input ref={scriptRef} type="file" accept=".docx,.doc,.txt,.md,.pdf,.fdx,.fountain,.spmd,.rtf" style={{display:'none'}} onChange={e=>handleScript(e.target.files[0])}/>
+                  {scriptFileName?(<><div style={{fontSize:24}}>✅</div><div style={{color:'#86efac',fontWeight:600,fontSize:12,marginTop:4,wordBreak:'break-all'}}>{scriptFileName}</div></>):(<><div style={{fontSize:24}}>📄</div><div style={{color:'#64748b',fontSize:12,marginTop:6}}>Drop script or click</div><div style={{fontSize:10,color:'#334155',marginTop:2}}>DOCX · PDF · FDX · TXT · RTF</div></>)}
                 </div>
               </div>
             </div>
