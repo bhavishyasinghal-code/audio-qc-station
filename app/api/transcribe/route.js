@@ -1,22 +1,27 @@
 import { NextResponse } from 'next/server';
 
-export const maxDuration = 60; // allow up to 60s for long audio files
+export const maxDuration = 120;
 
 export async function POST(request) {
   try {
     const formData = await request.formData();
     const audioFile = formData.get('file');
+    const chunkIndex = formData.get('chunkIndex') || '0';
+    const totalChunks = formData.get('totalChunks') || '1';
 
     if (!audioFile) {
       return NextResponse.json({ error: 'No audio file provided' }, { status: 400 });
     }
 
-    const groqKey = process.env.GROQ_API_KEY;
-    if (!groqKey) {
-      return NextResponse.json({ error: 'GROQ_API_KEY not configured on server' }, { status: 500 });
+    if (audioFile.size > 25 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Audio chunk too large. Max 25MB per chunk.' }, { status: 400 });
     }
 
-    // Forward to Groq Whisper API
+    const groqKey = process.env.GROQ_API_KEY;
+    if (!groqKey) {
+      return NextResponse.json({ error: 'GROQ_API_KEY not configured. Add it in Vercel → Settings → Environment Variables.' }, { status: 500 });
+    }
+
     const groqFormData = new FormData();
     groqFormData.append('file', audioFile);
     groqFormData.append('model', 'whisper-large-v3');
@@ -30,10 +35,11 @@ export async function POST(request) {
     });
 
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      console.error('Groq API error:', err);
+      const errText = await resp.text();
+      let errMsg;
+      try { errMsg = JSON.parse(errText).error?.message; } catch (e) { errMsg = errText.substring(0, 200); }
       return NextResponse.json(
-        { error: err.error?.message || `Transcription failed (${resp.status})` },
+        { error: errMsg || `Transcription failed (${resp.status})` },
         { status: resp.status }
       );
     }
@@ -41,11 +47,12 @@ export async function POST(request) {
     const data = await resp.json();
     return NextResponse.json({
       text: data.text || '',
-      segments: data.segments || [],
       duration: data.duration || 0,
+      chunkIndex: parseInt(chunkIndex),
+      totalChunks: parseInt(totalChunks),
     });
   } catch (err) {
     console.error('Transcribe error:', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: 'Server error: ' + err.message }, { status: 500 });
   }
 }

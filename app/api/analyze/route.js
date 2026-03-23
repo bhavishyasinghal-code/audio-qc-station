@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function POST(request) {
   try {
@@ -13,7 +13,7 @@ export async function POST(request) {
 
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) {
-      return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured on server' }, { status: 500 });
+      return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured. Add it in Vercel → Settings → Environment Variables.' }, { status: 500 });
     }
 
     const prompt = `You are a professional Audio Drama QC specialist. Compare the ORIGINAL SCRIPT against the ACTUAL TRANSCRIPT word by word.
@@ -79,19 +79,16 @@ Respond ONLY with valid JSON (no markdown, no backticks):
     });
 
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      console.error('Anthropic API error:', err);
-      return NextResponse.json(
-        { error: err.error?.message || `Analysis failed (${resp.status})` },
-        { status: resp.status }
-      );
+      const errText = await resp.text();
+      let errMsg;
+      try { errMsg = JSON.parse(errText).error?.message; } catch (e) { errMsg = errText.substring(0, 200); }
+      return NextResponse.json({ error: errMsg || `Analysis failed (${resp.status})` }, { status: resp.status });
     }
 
     const data = await resp.json();
     const text = data.content.map((i) => (i.type === 'text' ? i.text : '')).join('');
     let clean = text.replace(/```json|```/g, '').trim();
 
-    // Attempt JSON repair for truncated responses
     let parsed;
     try {
       parsed = JSON.parse(clean);
@@ -99,17 +96,11 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       let s = clean;
       if ((s.match(/"/g) || []).length % 2 !== 0) s += '"';
       const opens = { '[': 0, '{': 0 };
-      for (const ch of s) {
-        if (ch === '[' || ch === '{') opens[ch]++;
-        if (ch === ']') opens['[']--;
-        if (ch === '}') opens['{']--;
-      }
+      for (const ch of s) { if (ch === '[' || ch === '{') opens[ch]++; if (ch === ']') opens['[']--; if (ch === '}') opens['{']--; }
       for (let i = 0; i < opens['[']; i++) s += ']';
       for (let i = 0; i < opens['{']; i++) s += '}';
       s = s.replace(/,\s*([}\]])/g, '$1');
-      try {
-        parsed = JSON.parse(s);
-      } catch (e2) {
+      try { parsed = JSON.parse(s); } catch (e2) {
         return NextResponse.json({ error: 'Could not parse AI response. Try again.' }, { status: 500 });
       }
     }
@@ -117,6 +108,6 @@ Respond ONLY with valid JSON (no markdown, no backticks):
     return NextResponse.json(parsed);
   } catch (err) {
     console.error('Analyze error:', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: 'Server error: ' + err.message }, { status: 500 });
   }
 }
