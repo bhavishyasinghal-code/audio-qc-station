@@ -30,8 +30,7 @@ function parseScript(raw) {
   return parsed;
 }
 
-/* ─── WAV Compression Engine ─── */
-// Loads lamejs from CDN (MP3 encoder, runs in browser)
+/* ─── Load lamejs MP3 encoder from CDN ─── */
 async function loadLameJs() {
   if (typeof window !== 'undefined' && window.lamejs) return window.lamejs;
   return new Promise((resolve, reject) => {
@@ -43,95 +42,71 @@ async function loadLameJs() {
   });
 }
 
-// Parse WAV header to get format info
-function parseWavHeader(buffer) {
-  const v = new DataView(buffer);
-  // Find 'fmt ' chunk
-  let offset = 12;
-  let channels = 2, sampleRate = 44100, bitsPerSample = 16, dataOffset = 44;
-  while (offset < buffer.byteLength - 8) {
-    const id = String.fromCharCode(v.getUint8(offset), v.getUint8(offset+1), v.getUint8(offset+2), v.getUint8(offset+3));
-    const size = v.getUint32(offset + 4, true);
-    if (id === 'fmt ') {
-      channels = v.getUint16(offset + 10, true);
-      sampleRate = v.getUint32(offset + 12, true);
-      bitsPerSample = v.getUint16(offset + 22, true);
-    }
-    if (id === 'data') { dataOffset = offset + 8; break; }
-    offset += 8 + size;
-    if (size % 2 !== 0) offset++; // padding byte
-  }
-  return { channels, sampleRate, bitsPerSample, dataOffset };
-}
-
-// Compress WAV to MP3 segments (memory efficient, streams in chunks)
-// Returns array of MP3 Blobs, each ~5 minutes long
-async function compressWavToMp3Segments(file, onProgress) {
+/* ─── Compress any audio to MP3 using browser decoder ─── */
+async function compressToMp3Segments(file, onProgress) {
   const lame = await loadLameJs();
 
-  // Read header
-  const headerBuf = await file.slice(0, Math.min(file.size, 100000)).arrayBuffer();
-  const { channels, sampleRate, bitsPerSample, dataOffset } = parseWavHeader(headerBuf);
+  onProgress(0.05);
+
+  const arrayBuffer = await file.arrayBuffer();
+  onProgress(0.15);
+
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+  audioCtx.close();
+  onProgress(0.25);
+
+  const sourceSampleRate = decoded.sampleRate;
+  const sourceChannels = decoded.numberOfChannels;
+  const totalSamples = decoded.length;
+
+  const leftChannel = decoded.getChannelData(0);
+  const rightChannel = sourceChannels > 1 ? decoded.getChannelData(1) : leftChannel;
 
   const targetRate = 16000;
-  const targetBitRate = 48; // kbps — small files, plenty for speech recognition
-  const segmentSec = 300; // 5 min per segment
+  const ratio = sourceSampleRate / targetRate;
+  const totalDownsampled = Math.floor(totalSamples / ratio);
 
-  const bytesPerSample = bitsPerSample / 8;
-  const blockAlign = channels * bytesPerSample;
-  const ratio = sampleRate / targetRate;
-  const samplesPerSegment = segmentSec * targetRate;
+  const targetBitRate = 48;
+  const segmentSeconds = 300;
+  const samplesPerSegment = segmentSeconds * targetRate;
 
-  const readChunkSize = 5 * 1024 * 1024; // Read 5MB at a time
   const segments = [];
   let encoder = new lame.Mp3Encoder(1, targetRate, targetBitRate);
   let mp3Chunks = [];
-  let segmentSamples = 0;
-  let offset = dataOffset;
-  const totalData = file.size - dataOffset;
+  let segmentSampleCount = 0;
 
-  while (offset < file.size) {
-    const end = Math.min(offset + readChunkSize, file.size);
-    const raw = await file.slice(offset, end).arrayBuffer();
-    const view = new DataView(raw);
-    const numFrames = Math.floor(raw.byteLength / blockAlign);
-    const outLen = Math.floor(numFrames / ratio);
-    const samples = new Int16Array(outLen);
+  const blockSize = 50000;
 
-    for (let i = 0; i < outLen; i++) {
-      const srcFrame = Math.floor(i * ratio);
-      const byteOff = srcFrame * blockAlign;
-      if (byteOff + bytesPerSample > raw.byteLength) break;
+  for (let i = 0; i < totalDownsampled; i += blockSize) {
+    const end = Math.min(i + blockSize, totalDownsampled);
+    const blockLen = end - i;
+    const samples = new Int16Array(blockLen);
 
-      if (channels >= 2) {
-        const L = view.getInt16(byteOff, true);
-        const R = view.getInt16(byteOff + bytesPerSample, true);
-        samples[i] = (L + R) >> 1;
-      } else {
-        samples[i] = view.getInt16(byteOff, true);
+    for (let j = 0; j < blockLen; j++) {
+      const srcIdx = Math.floor((i + j) * ratio);
+      if (srcIdx < totalSamples) {
+        const mono = (leftChannel[srcIdx] + rightChannel[srcIdx]) / 2;
+        samples[j] = Math.max(-32768, Math.min(32767, Math.floor(mono * 32767)));
       }
     }
 
-    // Encode chunk
     const buf = encoder.encodeBuffer(samples);
     if (buf.length > 0) mp3Chunks.push(new Uint8Array(buf));
-    segmentSamples += outLen;
+    segmentSampleCount += blockLen;
 
-    // Segment boundary — flush and start new encoder
-    if (segmentSamples >= samplesPerSegment) {
+    if (segmentSampleCount >= samplesPerSegment) {
       const flush = encoder.flush();
       if (flush.length > 0) mp3Chunks.push(new Uint8Array(flush));
       segments.push(new Blob(mp3Chunks, { type: 'audio/mpeg' }));
       mp3Chunks = [];
       encoder = new lame.Mp3Encoder(1, targetRate, targetBitRate);
-      segmentSamples = 0;
+      segmentSampleCount = 0;
     }
 
-    offset = end;
-    onProgress(Math.min(0.99, (offset - dataOffset) / totalData));
+    onProgress(0.25 + 0.7 * (end / totalDownsampled));
   }
 
-  // Final segment
   const flush = encoder.flush();
   if (flush.length > 0) mp3Chunks.push(new Uint8Array(flush));
   if (mp3Chunks.length > 0) {
@@ -160,6 +135,7 @@ function analyzeAudioBuffer(buf) {
 }
 
 function fmt(s) { return `${Math.floor(s/60)}:${Math.floor(s%60).toString().padStart(2,'0')}.${Math.floor((s%1)*10)}`; }
+function formatSize(bytes) { if (bytes < 1024*1024) return (bytes/1024).toFixed(0)+' KB'; return (bytes/(1024*1024)).toFixed(1)+' MB'; }
 
 /* ─── UI Components ─── */
 function Waveform({ data, pauses, noiseEvents, duration }) {
@@ -190,11 +166,6 @@ function IssueSection({ title, icon, items, renderItem }) {
     <div style={{ fontSize:11,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:14 }}>{icon} {title}</div>
     {items.map((item,i) => (<div key={i} style={{ display:'flex',alignItems:'flex-start',gap:10,padding:'10px 0',borderTop:i>0?'1px solid #1e293b':'none',flexWrap:'wrap' }}>{renderItem(item)}</div>))}
   </div>);
-}
-
-function formatSize(bytes) {
-  if (bytes < 1024*1024) return (bytes/1024).toFixed(0) + ' KB';
-  return (bytes/(1024*1024)).toFixed(1) + ' MB';
 }
 
 /* ═══════════ MAIN APP ═══════════ */
@@ -240,60 +211,63 @@ export default function AudioQCStation() {
     setState(STATES.ANALYZING); setError(''); setResults(null); setTranscriptPreview(''); setCompressInfo('');
 
     try {
-      const isWav = audioFile.name.toLowerCase().endsWith('.wav');
-      const needsCompression = isWav && audioFile.size > 10 * 1024 * 1024;
+      const needsCompression = audioFile.size > 10 * 1024 * 1024;
       let audioSegments = [];
+      let audioAnalysis = { duration: 0, pauses: [], noiseEvents: [], waveform: [], avgRms: 0 };
 
       if (needsCompression) {
-        // ── STEP 1a: Compress large WAV files ──
         setProgress('Loading MP3 encoder...'); setProgressPct(2);
         await loadLameJs();
 
-        setProgress('Compressing ' + formatSize(audioFile.size) + ' WAV → MP3...'); setProgressPct(5);
-        audioSegments = await compressWavToMp3Segments(audioFile, pct => {
+        setProgress('Decoding & compressing ' + formatSize(audioFile.size) + '...'); setProgressPct(5);
+        audioSegments = await compressToMp3Segments(audioFile, pct => {
           setProgressPct(5 + Math.floor(pct * 40));
-          setProgress(`Compressing... ${Math.floor(pct * 100)}%`);
+          setProgress('Compressing... ' + Math.floor(pct * 100) + '%');
         });
 
         const totalCompressed = audioSegments.reduce((a, s) => a + s.size, 0);
-        setCompressInfo(`${formatSize(audioFile.size)} WAV → ${formatSize(totalCompressed)} MP3 (${audioSegments.length} segment${audioSegments.length > 1 ? 's' : ''})`);
+        setCompressInfo(formatSize(audioFile.size) + ' → ' + formatSize(totalCompressed) + ' (' + audioSegments.length + ' segment' + (audioSegments.length > 1 ? 's' : '') + ')');
+
+        // Analyze waveform from first segment
+        setProgress('Analyzing waveform...'); setProgressPct(48);
+        try {
+          const buf = await audioSegments[0].arrayBuffer();
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const decoded = await ctx.decodeAudioData(buf);
+          audioAnalysis = analyzeAudioBuffer(decoded);
+          ctx.close();
+        } catch (e) { /* waveform analysis optional */ }
       } else {
-        // ── STEP 1b: Small/MP3 file — use directly ──
         audioSegments = [audioFile];
+
+        setProgress('Analyzing audio waveform...'); setProgressPct(10);
+        try {
+          const buf = await audioFile.arrayBuffer();
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const decoded = await ctx.decodeAudioData(buf);
+          audioAnalysis = analyzeAudioBuffer(decoded);
+          ctx.close();
+        } catch (e) { /* waveform analysis optional */ }
       }
 
-      // ── STEP 2: Analyze waveform (use first segment for preview) ──
-      setProgress('Analyzing audio waveform...'); setProgressPct(48);
-      let audioAnalysis;
-      try {
-        const buf = await audioSegments[0].arrayBuffer();
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const decoded = await ctx.decodeAudioData(buf);
-        audioAnalysis = analyzeAudioBuffer(decoded);
-        ctx.close();
-      } catch (e) {
-        // If waveform analysis fails (e.g., for compressed segments), use defaults
-        audioAnalysis = { duration: 0, pauses: [], noiseEvents: [], waveform: [], avgRms: 0 };
-      }
-
-      // ── STEP 3: Transcribe each segment ──
-      setProgress(`Transcribing audio (${audioSegments.length} segment${audioSegments.length > 1 ? 's' : ''})...`);
+      // Transcribe each segment
+      setProgress('Transcribing audio (' + audioSegments.length + ' segment' + (audioSegments.length > 1 ? 's' : '') + ')...');
       setProgressPct(50);
 
       const transcripts = [];
       for (let i = 0; i < audioSegments.length; i++) {
-        setProgress(`Transcribing segment ${i + 1}/${audioSegments.length}...`);
+        setProgress('Transcribing segment ' + (i + 1) + '/' + audioSegments.length + '...');
         setProgressPct(50 + Math.floor(((i + 0.5) / audioSegments.length) * 25));
 
         const fd = new FormData();
-        fd.append('file', audioSegments[i], `audio_segment_${i}.mp3`);
+        fd.append('file', audioSegments[i], 'audio_segment_' + i + '.mp3');
         fd.append('chunkIndex', i.toString());
         fd.append('totalChunks', audioSegments.length.toString());
 
         const resp = await fetch('/api/transcribe', { method: 'POST', body: fd });
         const text = await resp.text();
         let data;
-        try { data = JSON.parse(text); } catch (e) { throw new Error('Server error during transcription: ' + text.substring(0, 100)); }
+        try { data = JSON.parse(text); } catch (e) { throw new Error('Server error: ' + text.substring(0, 100)); }
         if (!resp.ok) throw new Error(data.error || 'Transcription failed');
 
         transcripts.push(data.text || '');
@@ -302,9 +276,9 @@ export default function AudioQCStation() {
       const fullTranscript = transcripts.join(' ').trim();
       setTranscriptPreview(fullTranscript);
 
-      if (fullTranscript.length < 5) throw new Error('Transcription returned empty. Audio may be silent or corrupted.');
+      if (fullTranscript.length < 5) throw new Error('Transcription returned empty.');
 
-      // ── STEP 4: QC Analysis ──
+      // QC Analysis
       setProgress('Running AI QC analysis...'); setProgressPct(80);
       const sfxCues = parsedScript.filter(p => p.type==='SFX').map(p => p.text);
       const musicCues = parsedScript.filter(p => p.type==='MUSIC').map(p => p.text);
@@ -330,7 +304,7 @@ export default function AudioQCStation() {
       setProgressPct(95);
       const analyzeText = await analyzeResp.text();
       let analyzeData;
-      try { analyzeData = JSON.parse(analyzeText); } catch (e) { throw new Error('Server error during analysis: ' + analyzeText.substring(0, 100)); }
+      try { analyzeData = JSON.parse(analyzeText); } catch (e) { throw new Error('Server error: ' + analyzeText.substring(0, 100)); }
       if (!analyzeResp.ok) throw new Error(analyzeData.error || 'Analysis failed');
 
       setResults({ ...analyzeData, audioAnalysis, transcript: fullTranscript });
@@ -379,7 +353,7 @@ export default function AudioQCStation() {
                   onDrop={e=>{e.preventDefault();setDragAudio(false);handleAudio(e.dataTransfer.files[0])}}
                   style={{ border:`2px dashed ${dragAudio?'#f97316':audioName?'#16a34a':'#1e293b'}`,borderRadius:10,padding:'40px 16px',textAlign:'center',cursor:'pointer',background:dragAudio?'rgba(249,115,22,0.05)':'rgba(0,0,0,0.2)' }}>
                   <input ref={audioRef} type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" style={{ display:'none' }} onChange={e=>handleAudio(e.target.files[0])} />
-                  {audioName ? (<><div style={{fontSize:24}}>✅</div><div style={{color:'#86efac',fontWeight:600,fontSize:12,marginTop:4,wordBreak:'break-all'}}>{audioName}</div><div style={{fontSize:10,color:'#475569',marginTop:2}}>{formatSize(audioSize)}{audioSize > 10*1024*1024 && audioName.toLowerCase().endsWith('.wav') ? ' — will be auto-compressed' : ''}</div></>) : (<><div style={{fontSize:24}}>📁</div><div style={{color:'#64748b',fontSize:12,marginTop:6}}>Drop audio or click</div><div style={{fontSize:10,color:'#334155',marginTop:2}}>WAV · MP3 · M4A · OGG · FLAC (any size)</div></>)}
+                  {audioName ? (<><div style={{fontSize:24}}>✅</div><div style={{color:'#86efac',fontWeight:600,fontSize:12,marginTop:4,wordBreak:'break-all'}}>{audioName}</div><div style={{fontSize:10,color:'#475569',marginTop:2}}>{formatSize(audioSize)}{audioSize > 10*1024*1024 ? ' — will be auto-compressed' : ''}</div></>) : (<><div style={{fontSize:24}}>📁</div><div style={{color:'#64748b',fontSize:12,marginTop:6}}>Drop audio or click</div><div style={{fontSize:10,color:'#334155',marginTop:2}}>WAV · MP3 · M4A · OGG · FLAC (any size)</div></>)}
                 </div>
               </div>
               <div>
@@ -422,12 +396,12 @@ export default function AudioQCStation() {
 
             <button onClick={runQC} disabled={state===STATES.ANALYZING}
               style={{ padding:'16px 28px',background:state===STATES.ANALYZING?'#1e293b':'linear-gradient(135deg,#ef4444,#f97316,#eab308)',border:'none',borderRadius:10,color:'#fff',fontSize:14,fontWeight:800,fontFamily:'inherit',cursor:state===STATES.ANALYZING?'wait':'pointer',opacity:state===STATES.ANALYZING?0.7:1 }}>
-              {state===STATES.ANALYZING ? `⏳ ${progress}` : '▶ Run QC Analysis'}
+              {state===STATES.ANALYZING ? '⏳ '+progress : '▶ Run QC Analysis'}
             </button>
 
             {state===STATES.ANALYZING && (<>
               <div style={{ height:4,background:'#1e293b',borderRadius:2,overflow:'hidden' }}>
-                <div style={{ width:`${progressPct}%`,height:'100%',background:'linear-gradient(90deg,#ef4444,#f97316,#eab308)',borderRadius:2,transition:'width 0.3s ease' }} />
+                <div style={{ width:progressPct+'%',height:'100%',background:'linear-gradient(90deg,#ef4444,#f97316,#eab308)',borderRadius:2,transition:'width 0.3s ease' }} />
               </div>
               {compressInfo && <div style={{ fontSize:11,color:'#86efac' }}>✅ Compressed: {compressInfo}</div>}
               {transcriptPreview && <div style={{ background:'rgba(0,0,0,0.25)',border:'1px solid rgba(22,163,74,0.3)',borderRadius:10,padding:14 }}>
@@ -445,7 +419,7 @@ export default function AudioQCStation() {
               <div style={{ textAlign:'center',minWidth:100 }}>
                 <div style={{ fontSize:56,fontWeight:900,color:vColors[results.overallVerdict]||'#94a3b8',lineHeight:1,fontFamily:"'Instrument Serif',serif" }}>{results.overallScore}</div>
                 <div style={{ fontSize:9,color:'#475569',textTransform:'uppercase',letterSpacing:'0.15em',marginTop:2 }}>Score</div>
-                <div style={{ display:'inline-block',marginTop:8,padding:'4px 14px',borderRadius:14,fontSize:11,fontWeight:800,color:vColors[results.overallVerdict],background:`${vColors[results.overallVerdict]}18`,border:`1px solid ${vColors[results.overallVerdict]}40` }}>{results.overallVerdict}</div>
+                <div style={{ display:'inline-block',marginTop:8,padding:'4px 14px',borderRadius:14,fontSize:11,fontWeight:800,color:vColors[results.overallVerdict],background:(vColors[results.overallVerdict]||'')+'18',border:'1px solid '+(vColors[results.overallVerdict]||'')+'40' }}>{results.overallVerdict}</div>
               </div>
               <div style={{ flex:1 }}>
                 <div style={{ color:'#94a3b8',fontSize:13,lineHeight:1.7 }}>{results.summary}</div>
