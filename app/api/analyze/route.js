@@ -43,10 +43,13 @@ Pauses: ${audioData?.pauses || 'none'}
 Noise: ${audioData?.noise || 'none'}
 
 INSTRUCTIONS:
-1. Compare EVERY dialogue line from script against the transcript. If missing or substantially different, report it with the EXACT line from the script.
-2. Report word-level differences (expected vs heard).
-3. SFX/Music/Ambient won't appear as text — use waveform data to infer presence.
-4. ONLY report problems. Keep notes under 15 words.
+1. IGNORE title lines like "Ep 1 - Year 3100" or episode headers — these are NOT spoken dialogue.
+2. Compare each dialogue line against the transcript using FUZZY matching. Whisper transcription is imperfect — "Location. Earth." might appear as "Location, Earth" or "location earth" in the transcript. If the MEANING is the same, it is NOT missing.
+3. A line is ONLY "missing" if its content is completely absent from the transcript — not just worded slightly differently.
+4. For mispronunciations, only report if the word is clearly WRONG (different meaning), not just minor transcription artifacts like missing periods or slightly different punctuation.
+5. SFX/Music/Ambient won't appear as text — use waveform data to infer presence.
+6. ONLY report real problems. Keep notes under 15 words.
+7. Be lenient — Whisper often drops punctuation, changes capitalization, or slightly rewords short phrases. This is normal and should NOT be flagged.
 
 Respond ONLY with valid JSON (no markdown, no backticks):
 {
